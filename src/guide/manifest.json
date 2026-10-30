@@ -1,0 +1,87 @@
+[
+  {
+    "id": "welcome",
+    "title": "Welcome to RTcode",
+    "order": 0
+  },
+  {
+    "id": "workspaces-and-trust",
+    "title": "Workspaces & trust",
+    "order": 1
+  },
+  {
+    "id": "files-and-editor",
+    "title": "Files & editing",
+    "order": 2
+  },
+  {
+    "id": "search",
+    "title": "Workspace search",
+    "order": 3
+  },
+  {
+    "id": "git",
+    "title": "Minimal Git",
+    "order": 4
+  },
+  {
+    "id": "terminal",
+    "title": "Terminal",
+    "order": 5
+  },
+  {
+    "id": "ssh",
+    "title": "SSH connections",
+    "order": 6
+  },
+  {
+    "id": "languages-and-lsp",
+    "title": "Languages & IntelliSense",
+    "order": 7
+  },
+  {
+    "id": "formatting",
+    "title": "Formatting",
+    "order": 8
+  },
+  {
+    "id": "extensions",
+    "title": "Extensions",
+    "order": 9
+  },
+  {
+    "id": "appearance",
+    "title": "Appearance & layout",
+    "order": 10
+  },
+  {
+    "id": "settings-reference",
+    "title": "Settings reference",
+    "order": 11
+  },
+  {
+    "id": "keyboard",
+    "title": "Keyboard reference",
+    "order": 12
+  },
+  {
+    "id": "security-and-privacy",
+    "title": "Security & privacy",
+    "order": 13
+  },
+  {
+    "id": "troubleshooting",
+    "title": "Troubleshooting & recovery",
+    "order": 14
+  },
+  {
+    "id": "updates-and-limitations",
+    "title": "Updates & limitations",
+    "order": 15
+  },
+  {
+    "id": "glossary",
+    "title": "Glossary",
+    "order": 16
+  }
+]

@@ -1,0 +1,1 @@
+{"$schema":"../gen/schemas/desktop-schema.json","identifier":"main-window","description":"Single local workbench. No general shell, filesystem, or database access.","windows":["main"],"permissions":["core:event:allow-listen","core:event:allow-unlisten","core:window:allow-destroy"]}
