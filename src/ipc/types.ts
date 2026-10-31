@@ -62,20 +62,26 @@ export type Match = {
   text: string;
   revision: string;
 };
+export type FileMatch = { pathId: string; path: string; name: string };
 export type SearchSummary = { skippedFiles: number };
+export type FileSearch = {
+  files: FileMatch[];
+  total: number;
+  skippedFiles: number;
+};
 export type ReplaceResult = {
   updated: Document[];
   errors: string[];
   replacements: number;
 };
-export type ProjectSnapshot = {
-  files: {
-    path: string;
-    canonicalPath?: string;
-    pathId: string;
-    content: string;
-  }[];
-  warnings: string[];
+// A workspace path the language service asked for: a file with its text, or
+// a directory with the names of its subdirectories.
+export type ProjectEntry = {
+  path: string;
+  canonicalPath?: string | null;
+  pathId?: string | null;
+  content?: string | null;
+  directories?: string[] | null;
 };
 export type SearchOptions = {
   query: string;

@@ -3,11 +3,12 @@ import type {
   Entry,
   GitState,
   Match,
+  FileSearch,
   SearchOptions,
   Workspace,
   ReplaceResult,
 } from "./types";
-import { fileFilter, searchExpression } from "./search-patterns";
+import { fileFilter, rankFiles, searchExpression } from "./search-patterns";
 const files: Record<string, string> = {
   "src/main.ts": `import { createWorkspace } from './workspace';\nimport { registerCommands } from './commands';\nimport { createTerminal } from './terminal';\n\n/**\n * A quiet place to build something good.\n * One workspace. Your tools. No distractions.\n */\nexport async function boot() {\n  const workspace = await createWorkspace({\n    name: 'rtcode-sample',\n    theme: 'retro-82',\n    trust: 'restricted',\n  });\n\n  // Keep authority in the native core.\n  registerCommands(workspace);\n\n  if (workspace.trusted) {\n    await createTerminal({\n      cwd: workspace.root,\n      placement: 'right',\n      shell: 'system',\n    });\n  }\n\n  return workspace;\n}\n\nboot().catch(console.error);\n`,
   "src/workspace.ts": `export interface Workspace {\n  name: string;\n  root: string;\n  trusted: boolean;\n}\n\nexport async function createWorkspace(options: {\n  name: string;\n  theme: string;\n  trust: string;\n}): Promise<Workspace> {\n  return { name: options.name, root: '.', trusted: false };\n}\n`,
@@ -98,6 +99,14 @@ export function demoSave(id: string, text: string) {
   if (!Object.hasOwn(files, id)) throw Error("File not found");
   files[id] = text;
   return text;
+}
+export function demoSearchFiles(query: string): FileSearch {
+  const found = rankFiles(query, Object.keys(files)).map((path) => ({
+    pathId: path,
+    path,
+    name: path.split("/").pop()!,
+  }));
+  return { files: found, total: found.length, skippedFiles: 0 };
 }
 export function demoSearch(o: SearchOptions): Match[] {
   const re = searchExpression(o);

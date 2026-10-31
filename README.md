@@ -44,11 +44,11 @@ Those temporary directories may be removed by the operating system. For ongoing 
 ## Working features
 
 - Native folder picker, opaque workspace/path/document handles, restricted mode, exact-root trust.
-- Lazy first-level tree, root file/folder creation, syntax-aware Monaco tabs, undo, dirty markers, close confirmation, BOM/EOL preservation, hash conflict detection, atomic same-directory saves.
-- Built-in workspace search with cancellation, regex/case/word controls, comma-separated glob filters, no search time, file-size, or result-count caps, UTF-16 navigation, and individual/all-result replacement with revision checks.
+- Lazy first-level tree that lists every entry including Git-ignored paths such as node_modules with no entry-count cap, root file/folder creation, syntax-aware Monaco tabs, undo, dirty markers, close confirmation, BOM/EOL preservation, hash conflict detection, atomic same-directory saves.
+- Built-in file-name search with ranked results and a one-click toggle to the content filter, plus workspace content search with cancellation, regex/case/word controls, comma-separated glob filters, no search time, file-size, or result-count caps, UTF-16 navigation, and individual/all-result replacement with revision checks.
 - Git porcelain-v2 status, worktree listing and workspace switching with save/discard/cancel handling, separate local/remote refs, ten commits, patch views, trusted staging/unstaging and local branch switching.
 - Rust-owned PTYs rendered by xterm, up to eight sessions, right/bottom/hidden placement without reconstruction, OpenSSH launch, simple config-alias discovery.
-- Bundled TS/JS completion, diagnostics and navigation using tsconfig/jsconfig, inherited path aliases, nested projects, unopened sources and installed dependency types; JSON/CSS validation, HTML suggestions, and a Problems panel. Project indexing is bounded and refreshes on save/window focus. External language servers and framework plugins remain pending.
+- Bundled TS/JS completion, diagnostics and navigation using tsconfig/jsconfig, inherited path aliases, nested projects, unopened sources and installed dependency types; JSON/CSS validation, HTML suggestions, and a Problems panel. Project files load lazily as the language service asks for them, with no workspace snapshot, and refresh on save/window focus. External language servers and framework plugins remain pending.
 - Explicit stdin/stdout formatter profiles with caps, timeouts, trust, document-version checks, and one undo edit.
 - Backend SQLite preferences/trust, local fonts and workers, restricted CSP/capabilities, consistent Settings and Guide, command palette, keyboard shortcuts, high contrast and reduced motion.
 

@@ -1,8 +1,8 @@
 import {
   createSignal,
   createMemo,
-  untrack,
   createEffect,
+  on,
   onMount,
   onCleanup,
   For,
@@ -20,8 +20,8 @@ import type {
   GitWorktree,
   Match,
   Change,
-  ProjectSnapshot,
   SearchOptions,
+  FileMatch,
 } from "../ipc/types";
 import { errorMessage } from "../ipc/types";
 import { Icon } from "../components/Icon";
@@ -92,39 +92,9 @@ export default function App() {
     workspaceMenu.style.top = `${bounds.bottom + 5}px`;
     workspaceMenu.togglePopover();
   }
-  const [project, setProject] = createSignal<ProjectSnapshot>();
+  // The editor loads project files lazily and reports its status here.
   const [projectStatus, setProjectStatus] = createSignal("");
-  let projectRequest = 0;
-  let projectBusy = false;
-  let projectPending = false;
-  async function refreshProject() {
-    const ws = editorWorkspace();
-    if (!native || !ws) return;
-    if (projectBusy) {
-      projectPending = true;
-      return;
-    }
-    projectBusy = true;
-    const request = ++projectRequest;
-    setProjectStatus("INDEXING");
-    try {
-      const snapshot = await api.project(ws.id);
-      if (request !== projectRequest || editorWorkspace()?.id !== ws.id) return;
-      setProject(snapshot);
-      setProjectStatus(snapshot.warnings.length ? "PARTIAL" : "PROJECT");
-      if (snapshot.warnings.length) report(snapshot.warnings.join(" "));
-    } catch (error) {
-      if (request !== projectRequest || editorWorkspace()?.id !== ws.id) return;
-      setProjectStatus("INDEX ERROR");
-      report(errorMessage(error));
-    } finally {
-      projectBusy = false;
-      if (projectPending) {
-        projectPending = false;
-        void refreshProject();
-      }
-    }
-  }
+  const reloadProject = (full = false) => editor?.reloadProject(full);
   const [roots, setRoots] = createSignal<Record<string, Entry[]>>(
     native ? {} : { [sampleWorkspace.id]: demoTree() },
   );
@@ -241,6 +211,13 @@ export default function App() {
   const [include, setInclude] = createSignal("");
   const [exclude, setExclude] = createSignal("");
   const [results, setResults] = createSignal<Match[]>([]);
+  // "filter" searches file contents with include/exclude and replace;
+  // "files" finds files by name.
+  const [searchMode, setSearchMode] = createSignal<"filter" | "files">(
+    "filter",
+  );
+  const [fileResults, setFileResults] = createSignal<FileMatch[]>([]);
+  const [fileTotal, setFileTotal] = createSignal(0);
   const [searchState, setSearchState] = createSignal("IDLE");
   const [searchError, setSearchError] = createSignal("");
   const [replacement, setReplacement] = createSignal("");
@@ -249,7 +226,6 @@ export default function App() {
   const [switching, setSwitching] = createSignal(false);
   const [replaceErrors, setReplaceErrors] = createSignal<string[]>([]);
   const [searchSkipped, setSearchSkipped] = createSignal(0);
-  const [searchRefresh, setSearchRefresh] = createSignal(0);
   const searchOptions = (): SearchOptions => ({
     query: query(),
     regex: regex(),
@@ -288,8 +264,8 @@ export default function App() {
         report(
           `Replaced ${result.replacements} match${result.replacements === 1 ? "" : "es"} in ${result.updated.length} file${result.updated.length === 1 ? "" : "s"}.`,
         );
-        setSearchRefresh((value) => value + 1);
-        void refreshProject();
+        editor?.reloadProject();
+        void runSearch();
       } catch (error) {
         setReplaceErrors([errorMessage(error)]);
       } finally {
@@ -652,8 +628,7 @@ export default function App() {
       setDocs((v) =>
         v.map((d) => (d.id === doc.id ? { ...d, text, revision, dirty } : d)),
       );
-      setSearchRefresh((value) => value + 1);
-      void refreshProject();
+      reloadProject();
       report(
         native
           ? "Saved " + doc.name
@@ -973,52 +948,82 @@ export default function App() {
     </For>
   );
   createEffect(() => {
-    const id = editorWorkspace()?.id;
-    setProject(undefined);
-    projectRequest++;
-    if (id) void untrack(refreshProject);
-  });
-  createEffect(() => {
     if (sidebar() === "git" && workspace()) void refreshGit();
   });
-  createEffect(() => {
-    searchRefresh();
-    const opts = searchOptions();
+  // Searching only happens when the user asks for it.
+  async function runSearch() {
     const ws = workspace();
-    const old = searchId;
-    if (old) void api.cancelSearch(old);
-    searchId = crypto.randomUUID();
-    const id = searchId;
+    const opts = searchOptions();
+    const mode = searchMode();
+    if (searchId) void api.cancelSearch(searchId);
+    const id = (searchId = crypto.randomUUID());
     setResults([]);
+    setFileResults([]);
+    setFileTotal(0);
     setSearchError("");
     setSearchSkipped(0);
-    if (!opts.query || !ws) {
+    if (!ws || !(mode === "files" ? opts.query.trim() : opts.query)) {
       setSearchState("IDLE");
       return;
     }
-    setSearchState("WAITING");
-    const timer = setTimeout(async () => {
-      setSearchState("SEARCHING");
-      try {
+    setSearchState("SEARCHING");
+    try {
+      if (mode === "files") {
+        const found = await api.searchFiles(ws.id, id, opts.query);
+        if (searchId !== id) return;
+        setFileResults(found.files);
+        setFileTotal(found.total);
+        setSearchSkipped(found.skippedFiles);
+      } else {
         const summary = await api.search(ws.id, id, opts, (items) => {
           if (searchId === id) setResults((v) => [...v, ...items]);
         });
-        if (searchId === id) {
-          setSearchState("DONE");
-          setSearchSkipped(summary.skippedFiles);
-        }
-      } catch (e) {
-        if (searchId === id) {
-          setSearchError(errorMessage(e));
-          setSearchState("ERROR");
-        }
+        if (searchId !== id) return;
+        setSearchSkipped(summary.skippedFiles);
       }
-    }, 180);
-    onCleanup(() => clearTimeout(timer));
-  });
+      setSearchState("DONE");
+    } catch (e) {
+      if (searchId === id) {
+        setSearchError(errorMessage(e));
+        setSearchState("ERROR");
+      }
+    }
+  }
+  // Results belong to one workspace and one mode.
+  createEffect(
+    on(
+      [() => workspace()?.id, searchMode],
+      () => {
+        if (searchId) void api.cancelSearch(searchId);
+        searchId = "";
+        setResults([]);
+        setFileResults([]);
+        setFileTotal(0);
+        setSearchError("");
+        setSearchSkipped(0);
+        setSearchState("IDLE");
+      },
+      { defer: true },
+    ),
+  );
+  // Changing the query or options leaves the old results on screen, but they
+  // can no longer be replaced until the search is run again.
+  createEffect(
+    on(
+      searchOptions,
+      () => {
+        if (searchState() === "DONE") setSearchState("STALE");
+      },
+      { defer: true },
+    ),
+  );
   const commands = () => [
-    { label: "Reload project configuration", key: "", run: refreshProject },
-    { label: "Open folder", key: "⌘ O", run: openWorkspace },
+    {
+      label: "Reload project configuration",
+      key: "",
+      run: () => reloadProject(true),
+    },
+    { label: "Open workspace", key: "⌘ O", run: openWorkspace },
     { label: "Save active file", key: "⌘ S", run: save },
     { label: "Open Settings & Guide", key: "F1", run: () => openSettings() },
     {
@@ -1033,6 +1038,15 @@ export default function App() {
       label: "Search workspace",
       key: "⌘ ⇧ F",
       run: () => {
+        setSidebar("search");
+        setSidebarVisible(true);
+      },
+    },
+    {
+      label: "Search files by name",
+      key: "",
+      run: () => {
+        setSearchMode("files");
         setSidebar("search");
         setSidebarVisible(true);
       },
@@ -1104,10 +1118,7 @@ export default function App() {
     window.addEventListener("pointerup", stop);
   }
   onMount(() => {
-    const focus = () => {
-      void refreshProject();
-      setSearchRefresh((value) => value + 1);
-    };
+    const focus = () => reloadProject();
     window.addEventListener("focus", focus);
     onCleanup(() => window.removeEventListener("focus", focus));
     if (native) {
@@ -1145,6 +1156,9 @@ export default function App() {
         return;
       }
       if (e.key === "Escape") {
+        // An unhandled Escape reaches the native window and leaves macOS
+        // full screen. Popovers still light-dismiss through their own path.
+        if (!document.querySelector(":popover-open")) e.preventDefault();
         setSsh(false);
         if (settings()) closeSettings();
         return;
@@ -1343,7 +1357,7 @@ export default function App() {
               )}
             </For>
             <Show when={!workspaces().length}>
-              <p class="workspace-menu-heading">No folders open yet.</p>
+              <p class="workspace-menu-empty">No folders open yet.</p>
             </Show>
           </div>
           <button
@@ -1455,7 +1469,7 @@ export default function App() {
                   title="Refresh files"
                   onClick={() => guard(() => refreshTree())}
                 >
-                  <Icon name="refresh" size={13} />
+                  <Icon name="refresh" size={14} />
                 </button>
               </div>
               <Show
@@ -1524,7 +1538,7 @@ export default function App() {
                 <button
                   onClick={() => openSettings("Guide", "workspaces-and-trust")}
                 >
-                  <Icon name="shield" size={13} />
+                  <Icon name="shield" size={14} />
                   {workspace()?.trusted
                     ? "Review permissions"
                     : "Files are safe to explore"}
@@ -1533,124 +1547,187 @@ export default function App() {
               </div>
             </Show>
             <Show when={sidebar() === "search"}>
-              <div class="search-controls">
+              <div
+                class="search-controls"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && e.target instanceof HTMLInputElement)
+                    void runSearch();
+                }}
+              >
                 <label class="search-box">
-                  <Icon name="search" />
+                  <button
+                    class="search-mode"
+                    type="button"
+                    aria-label={
+                      searchMode() === "files"
+                        ? "Switch to content filter"
+                        : "Switch to file search"
+                    }
+                    title={
+                      searchMode() === "files"
+                        ? "File search. Click to filter file contents."
+                        : "Content filter. Click to search file names."
+                    }
+                    disabled={replaceBusy()}
+                    onClick={() =>
+                      setSearchMode((mode) =>
+                        mode === "files" ? "filter" : "files",
+                      )
+                    }
+                  >
+                    <Icon
+                      name={searchMode() === "files" ? "files" : "search"}
+                    />
+                  </button>
                   <input
-                    aria-label="Search workspace"
+                    aria-label={
+                      searchMode() === "files"
+                        ? "Search files"
+                        : "Search workspace"
+                    }
                     autocapitalize="off"
                     autocorrect="off"
                     spellcheck={false}
-                    placeholder="Search workspace…"
+                    placeholder={
+                      searchMode() === "files"
+                        ? "Search files by name…"
+                        : "Search workspace…"
+                    }
                     value={query()}
                     disabled={replaceBusy()}
                     onInput={(e) => setQuery(e.currentTarget.value)}
                   />
                 </label>
-                <Show when={showReplace()}>
-                  <label class="search-box replace-box">
+                <button
+                  class="search-run"
+                  type="button"
+                  disabled={replaceBusy()}
+                  onClick={() => void runSearch()}
+                >
+                  Search
+                </button>
+                <Show when={searchMode() === "filter"}>
+                  <Show when={showReplace()}>
+                    <label class="search-box replace-box">
+                      <input
+                        aria-label="Replace with"
+                        autocapitalize="off"
+                        autocorrect="off"
+                        spellcheck={false}
+                        placeholder="Replace with…"
+                        value={replacement()}
+                        disabled={replaceBusy()}
+                        onInput={(e) => setReplacement(e.currentTarget.value)}
+                      />
+                    </label>
+                    <Show when={regex()}>
+                      <small class="search-help">
+                        Capture groups: $1, $2, $&#123;name&#125;. $$ inserts $.
+                      </small>
+                    </Show>
+                  </Show>
+                  <div class="search-options">
+                    <For
+                      each={
+                        [
+                          ["Aa", caseSensitive, setCase],
+                          ["ab", wholeWord, setWhole],
+                          [".*", regex, setRegex],
+                        ] as const
+                      }
+                    >
+                      {([label, value, set]) => (
+                        <button
+                          classList={{ active: value() }}
+                          aria-pressed={value()}
+                          disabled={replaceBusy()}
+                          title={
+                            label === "Aa"
+                              ? "Match case"
+                              : label === "ab"
+                                ? "Whole word"
+                                : "Regular expression"
+                          }
+                          onClick={() => set((v) => !v)}
+                        >
+                          {label}
+                        </button>
+                      )}
+                    </For>
+                    <button
+                      aria-label="Toggle replace"
+                      aria-pressed={showReplace()}
+                      onClick={() => setShowReplace((value) => !value)}
+                    >
+                      Replace
+                    </button>
+                  </div>
+                  <label class="filter-field">
+                    INCLUDE
                     <input
-                      aria-label="Replace with"
+                      placeholder="src/**"
+                      autocomplete="off"
                       autocapitalize="off"
                       autocorrect="off"
                       spellcheck={false}
-                      placeholder="Replace with…"
-                      value={replacement()}
+                      title="Comma-separated globs, for example src/**, **/*.{ts,tsx}"
                       disabled={replaceBusy()}
-                      onInput={(e) => setReplacement(e.currentTarget.value)}
+                      value={include()}
+                      onInput={(e) => setInclude(e.currentTarget.value)}
                     />
                   </label>
-                  <Show when={regex()}>
-                    <small class="search-help">
-                      Capture groups: $1, $2, $&#123;name&#125;. $$ inserts $.
-                    </small>
+                  <label class="filter-field">
+                    EXCLUDE
+                    <input
+                      placeholder="**/test/**"
+                      autocomplete="off"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      spellcheck={false}
+                      title="Comma-separated globs, for example **/test/**, **/*.spec.ts"
+                      disabled={replaceBusy()}
+                      value={exclude()}
+                      onInput={(e) => setExclude(e.currentTarget.value)}
+                    />
+                  </label>
+                  <Show when={showReplace()}>
+                    <button
+                      class="replace-all"
+                      disabled={
+                        replaceBusy() ||
+                        searchState() !== "DONE" ||
+                        !results().length
+                      }
+                      onClick={() => replaceResults(results())}
+                    >
+                      {replaceBusy()
+                        ? "Replacing…"
+                        : `Replace all (${results().length})`}
+                    </button>
                   </Show>
                 </Show>
-                <div class="search-options">
-                  <For
-                    each={
-                      [
-                        ["Aa", caseSensitive, setCase],
-                        ["ab", wholeWord, setWhole],
-                        [".*", regex, setRegex],
-                      ] as const
-                    }
-                  >
-                    {([label, value, set]) => (
-                      <button
-                        classList={{ active: value() }}
-                        aria-pressed={value()}
-                        disabled={replaceBusy()}
-                        title={
-                          label === "Aa"
-                            ? "Match case"
-                            : label === "ab"
-                              ? "Whole word"
-                              : "Regular expression"
-                        }
-                        onClick={() => set((v) => !v)}
-                      >
-                        {label}
-                      </button>
-                    )}
-                  </For>
-                  <button
-                    aria-label="Toggle replace"
-                    aria-pressed={showReplace()}
-                    onClick={() => setShowReplace((value) => !value)}
-                  >
-                    Replace
-                  </button>
-                  <span class="grow" />
-                  <span>{searchState()}</span>
-                </div>
-                <label class="filter-field">
-                  INCLUDE
-                  <input
-                    placeholder="src/**"
-                    autocomplete="off"
-                    autocapitalize="off"
-                    autocorrect="off"
-                    spellcheck={false}
-                    title="Comma-separated globs, for example src/**, **/*.{ts,tsx}"
-                    disabled={replaceBusy()}
-                    value={include()}
-                    onInput={(e) => setInclude(e.currentTarget.value)}
-                  />
-                </label>
-                <label class="filter-field">
-                  EXCLUDE
-                  <input
-                    placeholder="**/test/**"
-                    autocomplete="off"
-                    autocapitalize="off"
-                    autocorrect="off"
-                    spellcheck={false}
-                    title="Comma-separated globs, for example **/test/**, **/*.spec.ts"
-                    disabled={replaceBusy()}
-                    value={exclude()}
-                    onInput={(e) => setExclude(e.currentTarget.value)}
-                  />
-                </label>
-                <Show when={showReplace()}>
-                  <button
-                    class="replace-all"
-                    disabled={
-                      replaceBusy() ||
-                      searchState() !== "DONE" ||
-                      !results().length
-                    }
-                    onClick={() => replaceResults(results())}
-                  >
-                    {replaceBusy()
-                      ? "Replacing…"
-                      : `Replace all (${results().length})`}
-                  </button>
+              </div>
+              <div class="section-bar">
+                {searchMode() === "files"
+                  ? fileTotal() > fileResults().length
+                    ? `${fileResults().length} OF ${fileTotal()} FILES`
+                    : `${fileResults().length} FILES`
+                  : `${results().length} RESULTS`}
+                <span class="grow" />
+                <Show when={searchState() !== "IDLE"}>
+                  <span class="search-state" aria-live="polite">
+                    {searchState()}
+                  </span>
                 </Show>
               </div>
-              <div class="section-bar">{results().length} RESULTS</div>
               <Show when={searchError()}>
                 <p class="inline-error">{searchError()}</p>
+              </Show>
+              <Show when={fileTotal() > fileResults().length}>
+                <p class="search-help">
+                  Showing the best {fileResults().length} matches. Add more of
+                  the name or path to narrow them.
+                </p>
               </Show>
               <Show when={searchSkipped()}>
                 <p class="search-help">
@@ -1665,7 +1742,21 @@ export default function App() {
                   </p>
                 )}
               </For>
-              <For each={results()}>
+              <Show when={searchMode() === "files"}>
+                <For each={fileResults()}>
+                  {(m) => (
+                    <button
+                      class="search-result file-result"
+                      title={m.path}
+                      onClick={() => openFile(m.pathId)}
+                    >
+                      <span>{m.name}</span>
+                      <span>{m.path}</span>
+                    </button>
+                  )}
+                </For>
+              </Show>
+              <For each={searchMode() === "filter" ? results() : []}>
                 {(m) => (
                   <div class="search-result-row">
                     <button
@@ -1697,20 +1788,42 @@ export default function App() {
                         disabled={replaceBusy() || searchState() !== "DONE"}
                         onClick={() => replaceResults([m])}
                       >
-                        ↦
+                        <Icon name="arrow" size={12} />
                       </button>
                     </Show>
                   </div>
                 )}
               </For>
-              <Show when={!query()}>
+              <Show
+                when={
+                  searchState() === "DONE" &&
+                  !(searchMode() === "files" ? fileResults() : results()).length
+                }
+              >
+                <p class="search-help">No matches.</p>
+              </Show>
+              <Show when={searchState() === "IDLE"}>
                 <div class="pane-empty">
-                  <p>
-                    Find a thread.
-                    <br />
-                    Follow it through your code.
-                  </p>
-                  <small>Ignores respected. No permanent index.</small>
+                  <Show
+                    when={searchMode() === "files"}
+                    fallback={
+                      <p>
+                        Find a thread.
+                        <br />
+                        Follow it through your code.
+                      </p>
+                    }
+                  >
+                    <p>
+                      Name a file.
+                      <br />
+                      Open it from anywhere.
+                    </p>
+                  </Show>
+                  <small>
+                    Press Enter or Search to run. Ignores respected. No
+                    permanent index.
+                  </small>
                 </div>
               </Show>
             </Show>
@@ -1726,7 +1839,12 @@ export default function App() {
                   <Icon name="refresh" size={14} />
                 </button>
               </div>
-              <div class="git-current">
+              <div
+                classList={{
+                  "git-current": true,
+                  "no-repo": git().branch === "No repository",
+                }}
+              >
                 <span class="micro">CURRENT BRANCH</span>
                 <strong>
                   <Icon name="git" />
@@ -1771,7 +1889,7 @@ export default function App() {
                         onClick={() => void openWorktree(tree)}
                       >
                         <span class="worktree-heading">
-                          <Icon name="folder" size={13} />
+                          <Icon name="folder" size={14} />
                           <strong>
                             {tree.branch ||
                               (tree.bare
@@ -1894,7 +2012,7 @@ export default function App() {
                               gitAction(staged ? "unstage" : "stage", c.path)
                             }
                           >
-                            <Icon name={staged ? "minus" : "plus"} size={13} />
+                            <Icon name={staged ? "minus" : "plus"} size={14} />
                           </button>
                         </div>
                       )}
@@ -2038,7 +2156,7 @@ export default function App() {
             <div class="editor-breadcrumb">
               <Icon name="files" size={12} />
               <span>{editorWorkspace()?.name}</span>
-              <Icon name="chevron" size={11} />
+              <Icon name="chevron" size={12} />
               <span>{active()?.relativePath}</span>
               <span class="grow" />
               <span>{active()?.readOnly || "UTF-8"}</span>
@@ -2056,7 +2174,8 @@ export default function App() {
                 openIds={docs().map((d) => d.id)}
                 documents={docs()}
                 workspaceId={editorWorkspace()?.id || "workspace"}
-                project={project()}
+                onProjectStatus={setProjectStatus}
+                onProjectError={report}
                 readOnly={replaceBusy() || switching()}
                 onProblems={setProblems}
                 onOpenDocument={(id, line, column, end) =>
@@ -2185,7 +2304,7 @@ export default function App() {
       </main>
       <footer class="statusbar">
         <button class="trust-status" onClick={() => trust()}>
-          <Icon name="shield" size={13} />
+          <Icon name="shield" size={14} />
           {workspace()?.trusted ? "TRUSTED" : "RESTRICTED"}
         </button>
         <span class="status-readout">
@@ -2205,10 +2324,7 @@ export default function App() {
         </span>
         <button
           class="lsp-status"
-          title={
-            project()?.warnings.join(" ") ||
-            "Project language services — open settings"
-          }
+          title={"Project language services — open settings"}
           onClick={() => openSettings("Languages & Format")}
         >
           INTELLISENSE::<span>{languageService()}</span>
@@ -2258,7 +2374,7 @@ export default function App() {
               .catch((e) => report(errorMessage(e)));
           }}
         >
-          <Icon name="terminal" size={13} />
+          <Icon name="terminal" size={14} />
           SSH::{terminalState() === "SSH PROCESS" ? "PROCESS" : "OFFLINE"}
           <Icon name="down" size={12} />
         </button>
@@ -2406,6 +2522,32 @@ export default function App() {
           class="command-palette"
           aria-label="Command palette"
           onCancel={() => setPalette(false)}
+          onKeyDown={(e) => {
+            const rows = [
+              ...paletteElement.querySelectorAll<HTMLButtonElement>(
+                ".command-row",
+              ),
+            ];
+            if (!rows.length) return;
+            const index = rows.indexOf(document.activeElement as never);
+            if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+              e.preventDefault();
+              const step = e.key === "ArrowDown" ? 1 : -1;
+              const next =
+                index < 0
+                  ? step > 0
+                    ? 0
+                    : rows.length - 1
+                  : (index + step + rows.length) % rows.length;
+              rows[next].focus();
+            } else if (
+              e.key === "Enter" &&
+              (e.target as HTMLElement).tagName === "INPUT"
+            ) {
+              e.preventDefault();
+              rows[0].click();
+            }
+          }}
         >
           <div class="command-input">
             <span>&gt;</span>
@@ -2437,14 +2579,16 @@ export default function App() {
                   void c.run();
                 }}
               >
-                <Icon name="chevron" size={13} />
+                <Icon name="chevron" size={12} />
                 <span>{c.label}</span>
-                <kbd>{c.key}</kbd>
+                <Show when={c.key}>
+                  <kbd>{c.key}</kbd>
+                </Show>
               </button>
             )}
           </For>
           <div class="palette-footer">
-            TAB to navigate <span>ENTER to execute</span>
+            ↑↓ to navigate <span>ENTER to execute</span>
           </div>
         </dialog>
       </Show>

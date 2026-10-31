@@ -4,7 +4,7 @@ use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -264,6 +264,119 @@ pub async fn search_start(
     .map_err(|_| AppError::new("internal", "Search worker stopped."))?
 }
 
+/// Ranks a workspace-relative path against a file-name query. Every
+/// whitespace-separated term must appear in the path, case-insensitively.
+/// Lower ranks sort first: exact name, name prefix, name substring, then
+/// matches elsewhere in the path. `None` means the path does not match.
+pub fn file_rank(query: &str, path: &str) -> Option<u8> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+    let path = path.to_lowercase();
+    if !query.split_whitespace().all(|term| path.contains(term)) {
+        return None;
+    }
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    Some(if name == query {
+        0
+    } else if name.starts_with(&query) {
+        1
+    } else if name.contains(&query) {
+        2
+    } else {
+        3
+    })
+}
+/// Most file-name matches returned. The total is reported so the UI can ask
+/// the user to refine the query instead of rendering every match.
+const FILE_LIMIT: usize = 200;
+fn search_files_workspace(
+    state: &State,
+    workspace_id: &str,
+    query: &str,
+    cancel: &AtomicBool,
+) -> Result<FileSearch> {
+    if query.trim().is_empty() {
+        return Err(AppError::new("invalid_request", "Enter a file name."));
+    }
+    let ws = state.workspace(workspace_id)?;
+    let mut found = FileSearch::default();
+    // Same ignore handling as content search, but dotfiles are listed so
+    // configuration files such as .env or .gitignore can be found.
+    let walker = ignore::WalkBuilder::new(&ws.root)
+        .require_git(false)
+        .hidden(false)
+        .follow_links(false)
+        .filter_entry(|entry| entry.depth() == 0 || entry.file_name() != ".git")
+        .build();
+    let mut ranked = Vec::new();
+    for entry in walker {
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(found);
+        }
+        let Ok(entry) = entry else {
+            found.skipped_files += 1;
+            continue;
+        };
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(&ws.root).unwrap();
+        let path = relative.to_string_lossy().replace('\\', "/");
+        if let Some(rank) = file_rank(query, &path) {
+            ranked.push((rank, path));
+        }
+    }
+    found.total = ranked.len();
+    ranked.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.len().cmp(&b.1.len()))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    // Handles are only created for the matches that are returned.
+    found.files = ranked
+        .into_iter()
+        .take(FILE_LIMIT)
+        .map(|(_, path)| FileMatch {
+            path_id: state.path_id(workspace_id, PathBuf::from(&path)),
+            name: path.rsplit('/').next().unwrap_or(&path).to_string(),
+            path,
+        })
+        .collect();
+    Ok(found)
+}
+#[tauri::command]
+pub async fn search_files(
+    app: tauri::AppHandle,
+    workspace_id: String,
+    request_id: String,
+    query: String,
+) -> Result<FileSearch> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let state = app.state::<State>();
+        let mut searches = state.searches.lock().unwrap();
+        if searches.contains_key(&request_id) {
+            return Err(AppError::new(
+                "invalid_request",
+                "Search ID is already active.",
+            ));
+        }
+        searches.insert(request_id.clone(), cancel.clone());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<State>();
+        let _registration = Registration {
+            state: &state,
+            id: request_id,
+        };
+        search_files_workspace(&state, &workspace_id, &query, &cancel)
+    })
+    .await
+    .map_err(|_| AppError::new("internal", "Search worker stopped."))?
+}
+
 #[derive(Default, Serialize)]
 pub struct ReplaceResult {
     updated: Vec<Document>,
@@ -455,6 +568,76 @@ mod tests {
         })
         .unwrap();
         found
+    }
+    fn files(state: &State, query: &str) -> FileSearch {
+        search_files_workspace(state, "ws", query, &AtomicBool::new(false)).unwrap()
+    }
+    #[test]
+    fn file_search_ranks_names_respects_ignores_and_lists_dotfiles() {
+        let (dir, state) = fixture();
+        for name in [
+            "src/workspace.ts",
+            "src/lib/workspace-utils.ts",
+            "docs/Workspace.md",
+            "workspace",
+            "src/other.ts",
+            ".env",
+            "node_modules/pkg/workspace.js",
+            ".git/workspace",
+        ] {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        std::fs::write(dir.path().join(".gitignore"), "node_modules\n").unwrap();
+        let paths = |query: &str| {
+            let found = files(&state, query);
+            assert_eq!(found.skipped_files, 0);
+            assert_eq!(found.total, found.files.len());
+            found.files.into_iter().map(|m| m.path).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths("WORKSPACE"),
+            [
+                "workspace",
+                "src/workspace.ts",
+                "docs/Workspace.md",
+                "src/lib/workspace-utils.ts",
+            ]
+        );
+        assert_eq!(
+            paths("src work"),
+            ["src/workspace.ts", "src/lib/workspace-utils.ts"]
+        );
+        assert_eq!(paths(".env"), [".env"]);
+        let other = files(&state, "other");
+        assert_eq!(other.files[0].name, "other.ts");
+        assert_eq!(other.files[0].path, "src/other.ts");
+        assert!(!other.files[0].path_id.is_empty());
+        assert!(search_files_workspace(&state, "ws", "  ", &AtomicBool::new(false)).is_err());
+    }
+    #[test]
+    fn file_search_returns_the_best_matches_and_the_full_count() {
+        let (dir, state) = fixture();
+        for index in 0..(FILE_LIMIT + 50) {
+            std::fs::write(dir.path().join(format!("item{index}.txt")), "x").unwrap();
+        }
+        let handles_before = state.paths.lock().unwrap().len();
+        let found = files(&state, "item");
+        assert_eq!(found.total, FILE_LIMIT + 50);
+        assert_eq!(found.files.len(), FILE_LIMIT);
+        // Only returned matches get path handles.
+        assert_eq!(
+            state.paths.lock().unwrap().len() - handles_before,
+            FILE_LIMIT
+        );
+    }
+    #[test]
+    fn file_search_stops_when_cancelled() {
+        let (dir, state) = fixture();
+        std::fs::write(dir.path().join("a.ts"), "x").unwrap();
+        let found = search_files_workspace(&state, "ws", "a", &AtomicBool::new(true)).unwrap();
+        assert!(found.files.is_empty());
     }
     #[test]
     fn search_and_replace_work_without_external_tools_and_preserve_bom_crlf() {

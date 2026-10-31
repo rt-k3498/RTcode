@@ -13,6 +13,6 @@ Focus energizes a crisp amber edge. Pane transitions last 120ms without animatin
 Canvas #0b0f14; surface #111821; raised #17212b; input #0e141b. Text #e7dccb; secondary #a7afb5; muted #87919b. Amber #faa968; teal #5db7a5; error #f07178. Interactive boundaries use #607480 (3.8:1 against input surfaces). One-pixel borders, 2px corners, 4px spacing unit, local monospace fonts. No external assets.
 
 ## Layout
-34px top strip, 30px pane headers, 28px status strip. Sidebar 248px default, editor at least 360px, right terminal 36%. Below 1000px terminal moves below and sidebar becomes a rail/overlay.
+34px top strip and pane headers (sidebar tabs, editor tabs, terminal and Problems bars), 30px editor breadcrumb, 28px status strip and pane footers. Spacing follows the 4px unit; workbench text never drops below 10px. Sidebar 248px default, editor at least 360px, right terminal 36%. Below 1000px terminal moves below and sidebar becomes a rail/overlay.
 
 The app name is RTcode; the original R_> logo remains. Appearance exposes customizable base colors with the original orange/teal palette as the default.

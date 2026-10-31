@@ -4,10 +4,17 @@ import {
   createEffect,
   createSignal,
   createMemo,
+  untrack,
 } from "solid-js";
 import type * as Monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import { themeTokens, diagnosticColors, type Palette } from "../theme/colors";
-import type { Document, ProjectSnapshot } from "../ipc/types";
+import type { Document } from "../ipc/types";
+import { api, native } from "../ipc/client";
+import {
+  ProjectFiles,
+  resolveProject,
+  type ProjectScanner,
+} from "./project-files";
 export type Problem = {
   documentId: string;
   path: string;
@@ -30,15 +37,19 @@ export type EditorHandle = {
   getVersion: () => number;
   replace: (text: string) => void;
   setOption: (key: string, value: unknown) => void;
+  // Re-reads project files that changed on disk. `full` also forgets
+  // installed dependencies.
+  reloadProject: (full?: boolean) => void;
 };
 export default function Editor(p: {
   document?: Document;
   openIds: string[];
   documents: Document[];
   workspaceId: string;
-  project?: ProjectSnapshot;
   readOnly?: boolean;
   onProblems: (problems: Problem[]) => void;
+  onProjectStatus: (status: string) => void;
+  onProjectError: (message: string) => void;
   onOpenDocument: (
     id: string,
     line: number,
@@ -88,9 +99,10 @@ export default function Editor(p: {
       if (model.getValue() !== doc.text) model.setValue(doc.text);
       models.set(doc.id, model);
       saved.set(doc.id, normalized(doc.text));
-      model.onDidChangeContent(() =>
-        p.onChange(doc.id, normalized(model!.getValue()) !== saved.get(doc.id)),
-      );
+      model.onDidChangeContent(() => {
+        p.onChange(doc.id, normalized(model!.getValue()) !== saved.get(doc.id));
+        if (doc.id === current) scheduleProjectLoad();
+      });
     } else if (doc.readOnly && model.getValue() !== doc.text) {
       model.setValue(doc.text);
       saved.set(doc.id, normalized(doc.text));
@@ -143,6 +155,123 @@ export default function Editor(p: {
       if (problems.length >= 1000) break;
     }
     p.onProblems(problems);
+  }
+  // Project files are loaded lazily: the TypeScript worker reports the paths
+  // it looks for, and only those are read from disk.
+  let project: ProjectFiles | undefined;
+  let loading = false;
+  let queued: "open" | "refresh" | "full" | undefined;
+  let typingTimer: ReturnType<typeof setTimeout> | undefined;
+  const scripts = ["typescript", "javascript"];
+  const defaultsFor = () => [
+    monaco.typescript.typescriptDefaults,
+    monaco.typescript.javascriptDefaults,
+  ];
+  let openVersion = 0;
+  const allLibs = (files = project) => [
+    ...(files?.libs() || []),
+    {
+      filePath: "rtcode://open-files",
+      content: JSON.stringify(
+        (JSON.parse(openPaths()) as string[]).map((path) =>
+          monaco.Uri.from({ scheme: "file", path }).toString(),
+        ),
+      ),
+      version: ++openVersion,
+    },
+  ];
+  // Publishes the loaded files to Monaco, which also revalidates open models.
+  function applyLibs() {
+    const libs = allLibs().map(({ filePath, content }) => ({
+      filePath,
+      content,
+    }));
+    for (const defaults of defaultsFor()) defaults.setExtraLibs(libs);
+  }
+  // Monaco registers its TypeScript service shortly after the first model of
+  // that language appears, so asking too early throws and is retried.
+  async function languageWorker(language: string, uri: Monaco.Uri) {
+    const get =
+      language === "javascript"
+        ? monaco.typescript.getJavaScriptWorker
+        : monaco.typescript.getTypeScriptWorker;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await (
+          await get()
+        )(uri);
+      } catch (error) {
+        if (attempt >= 50 || disposed) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+  }
+  async function loadProject(mode: "open" | "refresh" | "full" = "open") {
+    const doc = p.document;
+    if (!native || !ready() || !project) return;
+    const script = !!doc && !doc.readOnly && scripts.includes(doc.language);
+    if (!script && mode === "open") return;
+    if (loading) {
+      queued = queued === "full" || mode === "full" ? "full" : queued || mode;
+      return;
+    }
+    loading = true;
+    const files = project;
+    try {
+      if (!script) {
+        // No language service is running; just keep the files current.
+        await files.refresh(mode === "full");
+        applyLibs();
+        return;
+      }
+      p.onProjectStatus("INDEXING");
+      const model = ensureModel(doc!);
+      const worker = (await languageWorker(
+        doc!.language,
+        model.uri,
+      )) as unknown as ProjectScanner;
+      // While loading, files go straight to the worker with stable versions.
+      const push = () =>
+        worker.updateExtraLibs(
+          Object.fromEntries(
+            allLibs(files).map((lib) => [
+              lib.filePath,
+              { content: lib.content, version: lib.version },
+            ]),
+          ),
+        );
+      if (mode !== "open") {
+        await files.refresh(mode === "full");
+        await push();
+      }
+      const complete = await resolveProject(
+        files,
+        () => worker.scanProject(model.uri.toString()),
+        push,
+      );
+      if (project === files) {
+        applyLibs();
+        p.onProjectStatus(complete ? "PROJECT" : "PARTIAL");
+      }
+    } catch (error) {
+      if (project === files) {
+        p.onProjectStatus("INDEX ERROR");
+        p.onProjectError(
+          typeof error === "object" && error && "message" in error
+            ? String(error.message)
+            : String(error),
+        );
+      }
+    } finally {
+      loading = false;
+      const next = queued;
+      queued = undefined;
+      if (next) void loadProject(next);
+    }
+  }
+  function scheduleProjectLoad() {
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(() => void loadProject(), 700);
   }
   function updateTheme() {
     const tokens = themeTokens(p.colors, p.contrast);
@@ -234,14 +363,8 @@ export default function Editor(p: {
         const doc = p.documents.find(
           (doc) => models.get(doc.id)?.uri.toString() === uri.toString(),
         );
-        const projectFile = p.project?.files.find(
-          (file) =>
-            monaco.Uri.from({
-              scheme: "file",
-              path: `/${p.workspaceId}/${file.path}`,
-            }).toString() === uri.toString(),
-        );
-        if (!doc && !projectFile) return false;
+        const pathId = project?.pathId(uri.toString(true));
+        if (!doc && !pathId) return false;
         const line =
           selection && "startLineNumber" in selection
             ? selection.startLineNumber
@@ -250,7 +373,7 @@ export default function Editor(p: {
           selection && "startColumn" in selection
             ? selection.startColumn
             : selection?.column || 1;
-        p.onOpenDocument(doc?.id || projectFile!.pathId, line, column);
+        p.onOpenDocument(doc?.id || pathId!, line, column);
         return true;
       },
     });
@@ -315,55 +438,17 @@ export default function Editor(p: {
         }
       },
       setOption: (key, value) => editor?.updateOptions({ [key]: value }),
+      reloadProject: (full) => void loadProject(full ? "full" : "refresh"),
     });
   });
+  // A new workspace starts with an empty project and drops stray models of the
+  // previous one.
   createEffect(() => {
     if (!ready()) return;
-    const libs = (p.project?.files || []).map((file) => ({
-      filePath: monaco.Uri.from({
-        scheme: "file",
-        path: `/${p.workspaceId}/${file.path}`,
-      }).toString(),
-      content: file.content,
-    }));
-    libs.push({
-      filePath: "rtcode://project",
-      content: JSON.stringify(
-        Object.fromEntries(
-          (p.project?.files || [])
-            .filter(
-              (file) => file.canonicalPath && file.canonicalPath !== file.path,
-            )
-            .map((file) => [
-              monaco.Uri.from({
-                scheme: "file",
-                path: `/${p.workspaceId}/${file.path}`,
-              }).toString(),
-              monaco.Uri.from({
-                scheme: "file",
-                path: `/${p.workspaceId}/${file.canonicalPath}`,
-              }).toString(),
-            ]),
-        ),
-      ),
-    });
-    libs.push({
-      filePath: "rtcode://open-files",
-      content: JSON.stringify(
-        (JSON.parse(openPaths()) as string[]).map((path) =>
-          monaco.Uri.from({ scheme: "file", path }).toString(),
-        ),
-      ),
-    });
-    for (const defaults of [
-      monaco.typescript.typescriptDefaults,
-      monaco.typescript.javascriptDefaults,
-    ]) {
-      defaults.setExtraLibs(libs);
-      // Revalidate open models against refreshed configuration and disk content.
-      defaults.setCompilerOptions(defaults.getCompilerOptions());
-    }
-    const workspacePrefix = `/${p.workspaceId}/`;
+    const id = p.workspaceId;
+    project = new ProjectFiles(id, (paths) => api.projectRead(id, paths));
+    applyLibs();
+    const workspacePrefix = `/${id}/`;
     onCleanup(() => {
       for (const model of monaco.editor.getModels()) {
         if (
@@ -373,6 +458,15 @@ export default function Editor(p: {
           model.dispose();
       }
     });
+  });
+  createEffect(() => {
+    openPaths();
+    if (ready()) applyLibs();
+  });
+  createEffect(() => {
+    if (!ready()) return;
+    p.workspaceId;
+    if (p.document?.id) untrack(() => void loadProject());
   });
   createEffect(() => {
     if (!ready()) return;
@@ -401,6 +495,7 @@ export default function Editor(p: {
   });
   onCleanup(() => {
     disposed = true;
+    clearTimeout(typingTimer);
     disposables.forEach((subscription) => subscription.dispose());
     editor?.dispose();
     models.forEach((m) => m.dispose());

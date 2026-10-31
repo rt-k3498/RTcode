@@ -8,6 +8,35 @@ export function searchExpression(options: SearchOptions) {
     options.caseSensitive ? "gu" : "giu",
   );
 }
+// Mirrors the native file_rank: every whitespace-separated term must appear in
+// the path (case-insensitive). 0 exact name, 1 name prefix, 2 name substring,
+// 3 elsewhere in the path; undefined when the path does not match.
+export function fileRank(query: string, path: string): number | undefined {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return undefined;
+  const haystack = path.toLowerCase();
+  if (!needle.split(/\s+/).every((term) => haystack.includes(term)))
+    return undefined;
+  const name = haystack.slice(haystack.lastIndexOf("/") + 1);
+  if (name === needle) return 0;
+  if (name.startsWith(needle)) return 1;
+  if (name.includes(needle)) return 2;
+  return 3;
+}
+export function rankFiles(query: string, paths: string[]) {
+  return paths
+    .map((path) => ({ path, rank: fileRank(query, path) }))
+    .filter(
+      (item): item is { path: string; rank: number } => item.rank !== undefined,
+    )
+    .sort(
+      (a, b) =>
+        a.rank - b.rank ||
+        a.path.length - b.path.length ||
+        (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+    )
+    .map((item) => item.path);
+}
 export function fileFilter(input: string) {
   const patterns: string[] = [];
   let depth = 0,

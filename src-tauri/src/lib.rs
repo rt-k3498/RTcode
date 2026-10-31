@@ -111,11 +111,7 @@ fn close_workspace(state: &State, workspace_id: &str) {
         .lock()
         .unwrap()
         .retain(|_, doc| doc.workspace != workspace_id);
-    state
-        .paths
-        .lock()
-        .unwrap()
-        .retain(|_, path| path.workspace != workspace_id);
+    state.paths.lock().unwrap().remove_workspace(workspace_id);
 }
 #[tauri::command]
 fn workspace_set_trust(
@@ -281,9 +277,10 @@ pub fn run() {
             git::git_action,
             git::git_diff,
             search::search_start,
+            search::search_files,
             search::search_cancel,
             search::search_replace,
-            project::project_snapshot,
+            project::project_read,
             terminal::terminal_create,
             terminal::terminal_write,
             terminal::terminal_resize,

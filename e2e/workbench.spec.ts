@@ -34,6 +34,7 @@ test("workbench, guide, commands, search, editing, and responsive layouts", asyn
   await page
     .getByRole("textbox", { name: "Search workspace" })
     .fill("createWorkspace");
+  await page.locator(".search-run").click();
   await expect(page.locator(".search-result").first()).toBeVisible();
   await page.locator(".search-result").first().click();
   await page

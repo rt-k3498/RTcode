@@ -9,7 +9,8 @@ import type {
   Stream,
   SearchSummary,
   ReplaceResult,
-  ProjectSnapshot,
+  ProjectEntry,
+  FileSearch,
 } from "./types";
 import {
   sampleWorkspace,
@@ -17,15 +18,16 @@ import {
   demoSave,
   demoTree,
   demoSearch,
+  demoSearchFiles,
   demoReplace,
   emptyGit,
 } from "./demo";
 export const native = isTauri();
 export const api = {
-  project: (workspaceId: string) =>
+  projectRead: (workspaceId: string, paths: string[]) =>
     native
-      ? invoke<ProjectSnapshot>("project_snapshot", { workspaceId })
-      : Promise.resolve({ files: [], warnings: [] } as ProjectSnapshot),
+      ? invoke<ProjectEntry[]>("project_read", { workspaceId, paths })
+      : Promise.resolve([] as ProjectEntry[]),
   launchWorkspace: () =>
     native
       ? invoke<Workspace | null>("workspace_open_launch_directory")
@@ -97,6 +99,10 @@ export const api = {
       channel,
     });
   },
+  searchFiles: (workspaceId: string, requestId: string, query: string) =>
+    native
+      ? invoke<FileSearch>("search_files", { workspaceId, requestId, query })
+      : Promise.resolve(demoSearchFiles(query)),
   replaceMatches: (
     workspaceId: string,
     options: SearchOptions,

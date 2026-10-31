@@ -3,11 +3,15 @@
 
 ## Search a folder
 
-Choose Search and enter a query. Results update after 180 ms. Aa enables case sensitivity, ab enables whole-word matching, and .* enables regular expressions. Include and exclude fields accept comma-separated glob patterns, such as src/**, **/*.{ts,tsx}. A plain folder name matches that folder at any depth; prefix ./ to anchor it to the workspace root. Invalid expressions and filters appear inline.
+Choose Search, enter a query, and press Enter or the Search button. Nothing is searched while you type; after you change the query or an option, the results are marked STALE until you search again, and Replace all stays disabled. Aa enables case sensitivity, ab enables whole-word matching, and .* enables regular expressions. Include and exclude fields accept comma-separated glob patterns, such as src/**, **/*.{ts,tsx}. A plain folder name matches that folder at any depth; prefix ./ to anchor it to the workspace root. Invalid expressions and filters appear inline.
 
-## Bounded results
+## Find files by name
 
-Search runs inside the desktop app without an external executable. It respects .gitignore and .ignore, and skips hidden files, symlinks, and binary/non-UTF-8 files. Search has no time, file-size, line-length, query/filter-length, or result-count limit. Long result previews are shortened around each match; the full line is searched. A new request cancels the previous search. Select a result to jump to the highlighted UTF-16 editor range. Search reads saved files; save edits to include them. The Rust regex engine supports captures and Unicode matching, but not lookaround or backreferences in patterns.
+The icon at the left of the search field switches modes. The magnifying glass marks the content filter described above. Select it to switch to file search, marked by the files icon, and the include, exclude, and replace controls disappear because they apply only to content filtering. Enter part of a file name and press Enter or Search; every space-separated term must appear somewhere in the file's path, ignoring case. Exact names sort first, then names starting with the query, names containing it, and finally paths that match elsewhere. Only the best 200 matches are listed, with a note giving the total, so add more of the name or path to narrow them. Select a result to open that file. File search respects .gitignore and .ignore and lists dotfiles. The typed text is kept when switching modes, but the results are cleared.
+
+## Limits
+
+Search runs inside the desktop app without an external executable. It respects .gitignore and .ignore, and skips hidden files, symlinks, and binary/non-UTF-8 files. Content search has no time, file-size, line-length, query/filter-length, or result-count limit. Long result previews are shortened around each match; the full line is searched. A new request cancels the previous search. Select a result to jump to the highlighted UTF-16 editor range. Search reads saved files; save edits to include them. The Rust regex engine supports captures and Unicode matching, but not lookaround or backreferences in patterns.
 
 ## Replace matches
 

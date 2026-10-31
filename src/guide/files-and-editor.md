@@ -3,7 +3,7 @@
 
 ## Open and edit
 
-Select a file from the tree to open a tab. Monaco provides undo, find, multiple cursors, and syntax highlighting. A dot marks unsaved changes. Save with Cmd/Ctrl+S. Closing a dirty tab requires an explicit discard decision.
+The explorer lists every entry in a folder, including dotfiles and paths ignored by Git such as node_modules, with no entry-count limit. Select a file from the tree to open a tab. Monaco provides undo, find, multiple cursors, and syntax highlighting. A dot marks unsaved changes. Save with Cmd/Ctrl+S. Closing a dirty tab requires an explicit discard decision.
 
 ## Safe save
 

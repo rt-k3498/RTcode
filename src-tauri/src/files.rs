@@ -151,24 +151,25 @@ pub fn tree_read_children(
     workspace_id: String,
     path_id: String,
 ) -> Result<Vec<Entry>> {
-    let ws = state.workspace(&workspace_id)?;
-    let dir = resolve(&state, &workspace_id, &path_id)?;
+    read_children(&state, &workspace_id, &path_id)
+}
+
+pub fn read_children(state: &State, workspace_id: &str, path_id: &str) -> Result<Vec<Entry>> {
+    let ws = state.workspace(workspace_id)?;
+    let dir = resolve(state, workspace_id, path_id)?;
     let mut entries = Vec::new();
+    // The explorer lists every directory entry, including dotfiles and paths
+    // ignored by Git such as node_modules. Every entry is returned; the
+    // explorer applies no entry-count cap.
     for value in ignore::WalkBuilder::new(&dir)
         .max_depth(Some(1))
-        .hidden(false)
+        .standard_filters(false)
         .follow_links(false)
         .build()
         .skip(1)
     {
         let value = value.map_err(|e| AppError::new("internal", e.to_string()))?;
-        if entries.len() >= 5000 {
-            return Err(AppError::new(
-                "unsupported",
-                "Directory exceeds 5,000 entries. Paged large-directory support is pending.",
-            ));
-        }
-        entries.push(entry(&state, &ws, value.path())?);
+        entries.push(entry(state, &ws, value.path())?);
     }
     entries.sort_by(|a, b| {
         b.directory
@@ -362,13 +363,11 @@ pub fn file_rename(
     fs::rename(&source, &dest)?;
     let old = source.strip_prefix(&ws.root).unwrap();
     let new = dest.strip_prefix(&ws.root).unwrap();
-    for handle in state.paths.lock().unwrap().values_mut() {
-        if handle.workspace == workspace_id {
-            if let Ok(suffix) = handle.relative.strip_prefix(old) {
-                handle.relative = new.join(suffix);
-            }
-        }
-    }
+    state
+        .paths
+        .lock()
+        .unwrap()
+        .rename_prefix(&workspace_id, old, new);
     for doc in state.documents.lock().unwrap().values_mut() {
         if doc.workspace == workspace_id {
             if let Ok(suffix) = doc.path.strip_prefix(&source) {
@@ -503,6 +502,37 @@ mod save_tests {
         let root_id = state.path_id("ws", PathBuf::new());
         assert!(mutation_path(&state, "ws", &root_id).is_err());
         assert!(mutation_path(&state, "other", &link).is_err());
+    }
+    #[test]
+    fn explorer_lists_git_ignored_and_hidden_entries() {
+        let (dir, state, _) = fixture(b"x", false, "\n");
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "x").unwrap();
+        fs::write(root.join(".env"), "x").unwrap();
+        fs::write(root.join(".gitignore"), "node_modules\n.env\n").unwrap();
+        let root_id = state.path_id("ws", PathBuf::new());
+        let names: Vec<String> = read_children(&state, "ws", &root_id)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(names, ["node_modules", ".env", ".gitignore", "example.txt"]);
+        let modules =
+            read_children(&state, "ws", &state.path_id("ws", "node_modules".into())).unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].relative_path, "node_modules/pkg");
+    }
+    #[test]
+    fn explorer_has_no_entry_count_cap() {
+        let (dir, state, _) = fixture(b"x", false, "\n");
+        let root = dir.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("many")).unwrap();
+        for index in 0..6000 {
+            fs::write(root.join("many").join(format!("{index}.txt")), "").unwrap();
+        }
+        let entries = read_children(&state, "ws", &state.path_id("ws", "many".into())).unwrap();
+        assert_eq!(entries.len(), 6000);
     }
     #[test]
     fn encoded_size_limit_preserves_original_file() {

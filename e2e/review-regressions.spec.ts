@@ -148,8 +148,8 @@ test("adding a workspace preserves existing terminal sessions", async ({
             return {};
           case "settings_update":
             return;
-          case "project_snapshot":
-            return { files: [], warnings: [] };
+          case "project_read":
+            return [];
           case "plugin:event|listen":
             return 1;
           default:

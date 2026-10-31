@@ -33,8 +33,8 @@ test("native startup displays the launch folder without opening the picker", asy
             ];
           case "settings_get":
             return {};
-          case "project_snapshot":
-            return { files: [], warnings: [] };
+          case "project_read":
+            return [];
           case "plugin:event|listen":
             return 1;
           case "workspace_pick_and_open":

@@ -14,7 +14,9 @@ test("native project aliases resolve unopened files and Go to Definition opens t
       "apps/web/src/main.ts":
         'import { answer } from "@/lib/value";\nconst result: number = answer;\n',
       "apps/web/src/lib/value.ts": "export const answer = 42;\n",
+      "apps/web/src/unrelated.ts": "export const nothing = 1;\n",
     };
+    host.__reads = [] as string[];
     host.__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: "main" } },
       transformCallback: () => 1,
@@ -38,15 +40,18 @@ test("native project aliases resolve unopened files and Go to Definition opens t
               displayPath: "/other",
               trusted: false,
             };
-          case "project_snapshot":
-            return {
-              files: Object.entries(files).map(([path, content]) => ({
-                path,
-                pathId: path,
-                content,
-              })),
-              warnings: [],
-            };
+          case "project_read":
+            host.__reads.push(...args.paths);
+            return args.paths.flatMap((path: string) => {
+              if (path in files)
+                return [{ path, pathId: path, content: files[path] }];
+              const dirs = Object.keys(files)
+                .filter((name) => name.startsWith(path + "/"))
+                .map((name) => name.slice(path.length + 1).split("/")[0]);
+              return dirs.length
+                ? [{ path, directories: [...new Set(dirs)] }]
+                : [];
+            });
           case "tree_read_children":
             if (args.workspaceId === "other") return [];
             return [
@@ -83,6 +88,10 @@ test("native project aliases resolve unopened files and Go to Definition opens t
   await page.getByRole("button", { name: "TS main.ts", exact: true }).click();
   await expect(page.locator(".monaco-editor")).toBeVisible();
   await expect(page.locator(".statusbar")).toContainText("PROJECT");
+  // Only the files the language service asked for were read.
+  expect(await page.evaluate(() => (window as any).__reads)).not.toContain(
+    "apps/web/src/unrelated.ts",
+  );
   // Monaco loads its TypeScript service after the editor becomes visible.
   await expect(async () => {
     const diagnostics = await page.evaluate(async () => {

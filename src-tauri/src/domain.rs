@@ -135,6 +135,21 @@ pub struct SearchOptions {
     pub include: String,
     pub exclude: String,
 }
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FileMatch {
+    pub path_id: String,
+    pub path: String,
+    pub name: String,
+}
+/// Best file-name matches plus how many files matched in all.
+#[derive(Serialize, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSearch {
+    pub files: Vec<FileMatch>,
+    pub total: usize,
+    pub skipped_files: usize,
+}
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchMatch {

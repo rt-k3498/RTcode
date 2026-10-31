@@ -60,8 +60,8 @@ test("multiple roots isolate files, terminals, trust, and replacement", async ({
             return;
           case "settings_get":
             return {};
-          case "project_snapshot":
-            return { files: [], warnings: [] };
+          case "project_read":
+            return [];
           case "plugin:event|listen":
             return 1;
           case "git_snapshot":
